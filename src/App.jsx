@@ -798,13 +798,6 @@ export default function App() {
 
   return (
     <main className="app">
-      <header className="toolbar">
-        <div className="brand">
-          <span className="brand-mark" />
-          <strong>Whiteboard</strong>
-        </div>
-      </header>
-
       <section className="canvas-wrap">
 
         <canvas

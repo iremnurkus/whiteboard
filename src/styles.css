@@ -16,37 +16,9 @@ html, body, #root {
 
 .app {
   display: grid;
-  grid-template-rows: 50px 1fr;
+  grid-template-rows: 1fr;
   height: 100%;
-  gap: 8px;
   padding: 8px;
-}
-
-.toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  padding: 4px 10px;
-  border: 1px solid #dce3ed;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.96);
-  box-shadow: 0 8px 30px rgba(31, 41, 55, 0.08);
-  -webkit-app-region: drag;
-}
-
-.brand {
-  display: flex;
-  align-items: center;
-}
-
-.brand { gap: 8px; font-size: 16px; }
-
-.brand-mark {
-  width: 20px;
-  height: 20px;
-  border: 5px solid #2563eb;
-  border-radius: 6px;
-  transform: rotate(45deg);
 }
 
 .canvas-wrap {
