@@ -3,6 +3,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 
 const STORAGE_KEY = "whiteboard-document-v1";
+const BACKGROUND_KEY = "whiteboard-background-v1";
 const PDF_PAGE_WIDTH = 700;
 const PDF_PAGE_GAP = 24;
 
@@ -14,6 +15,49 @@ const loadPdfJs = async () => {
   pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker.default;
   return pdfjsLib;
 };
+
+const iconPaths = {
+  pen: <><path d="m4 20 4.5-1 10-10a2.1 2.1 0 0 0-3-3l-10 10L4 20Z" /><path d="m14.5 7.5 3 3" /></>,
+  eraser: <><path d="m7 20-4-4a2 2 0 0 1 0-3l8-8a2 2 0 0 1 3 0l7 7a2 2 0 0 1 0 3l-5 5H7Z" /><path d="m8 8 8 8" /></>,
+  pan: <><path d="M12 3v18M3 12h18" /><path d="m9 6 3-3 3 3M9 18l3 3 3-3M6 9l-3 3 3 3M18 9l3 3-3 3" /></>,
+  select: <><path d="m5 3 13 12-6 .5L9 21 5 3Z" /><path d="m13 16 4 5" /></>,
+  color: <><path d="M12 3a9 9 0 1 0 0 18h1a2 2 0 0 0 1.5-3.3 1.5 1.5 0 0 1 1.1-2.5H18a3 3 0 0 0 3-3c0-5.1-4-9.2-9-9.2Z" /><circle cx="7.5" cy="11" r="1" /><circle cx="10" cy="7.5" r="1" /><circle cx="15" cy="8" r="1" /></>,
+  width: <><path d="M4 6h16M4 12h16M4 18h16" /><path d="M7 5v2M12 10v4M17 16v4" /></>,
+  undo: <><path d="M9 14 4 9l5-5" /><path d="M4 9h9a7 7 0 0 1 0 14h-2" /></>,
+  redo: <><path d="m15 14 5-5-5-5" /><path d="M20 9h-9a7 7 0 0 0 0 14h2" /></>,
+  zoom: <><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 5 5M10.5 7v7M7 10.5h7" /></>,
+  clear: <><path d="M4 7h16M10 11v6M14 11v6M5 7l1 14h12l1-14M9 7V4h6v3" /></>,
+  save: <><path d="M5 3h12l4 4v14H3V3h2Z" /><path d="M7 3v6h10V3M7 21v-8h10v8" /></>,
+  open: <><path d="M3 6h7l2 2h9v11H3V6Z" /><path d="M3 10h18" /></>,
+  image: <><rect x="3" y="4" width="18" height="16" rx="2" /><circle cx="8.5" cy="9" r="1.5" /><path d="m4 17 5-5 4 4 3-3 4 4" /></>,
+  download: <><path d="M12 3v12M7 10l5 5 5-5M4 20h16" /></>,
+  plain: <><rect x="4" y="4" width="16" height="16" rx="2" fill="#fff" /></>,
+  grid: <><rect x="4" y="4" width="16" height="16" rx="2" fill="#fff" /><path d="M12 4v16M4 12h16" /></>,
+  ruled: <><rect x="4" y="4" width="16" height="16" rx="2" fill="#fff" /><path d="M9 5v14M11 9h7M11 13h7M11 17h7" /></>,
+};
+
+function Icon({ name, style }) {
+  return (
+    <svg viewBox="0 0 24 24" style={style} aria-hidden="true">
+      {iconPaths[name]}
+    </svg>
+  );
+}
+
+function DockButton({ icon, label, onClick, active = false, pressed }) {
+  return (
+    <button
+      className={active ? "dock-button active" : "dock-button"}
+      type="button"
+      onClick={onClick}
+      title={label}
+      aria-label={label}
+      {...(pressed === undefined ? {} : { "aria-pressed": pressed })}
+    >
+      <Icon name={icon} />
+    </button>
+  );
+}
 
 function cloneStrokes(strokes) {
   return strokes.map((stroke) => ({
@@ -37,6 +81,7 @@ export default function App() {
   const futureRef = useRef([]);
   const viewRef = useRef({ x: 0, y: 0, zoom: 1 });
   const panRef = useRef(null);
+  const rightPanMovedRef = useRef(false);
   const imageDragRef = useRef(null);
   const fileInputRef = useRef(null);
   const imageInputRef = useRef(null);
@@ -46,6 +91,13 @@ export default function App() {
   const [tool, setTool] = useState("pen");
   const [zoomLabel, setZoomLabel] = useState(100);
   const [selectedImageId, setSelectedImageId] = useState(null);
+  const [contextImageId, setContextImageId] = useState(null);
+  const [isPanning, setIsPanning] = useState(false);
+  const [showWidthControl, setShowWidthControl] = useState(false);
+  const [background, setBackground] = useState(() => {
+    const saved = localStorage.getItem(BACKGROUND_KEY);
+    return saved === "plain" || saved === "ruled" ? saved : "grid";
+  });
   const [notice, setNotice] = useState("");
 
   const snapshot = () => ({
@@ -140,6 +192,17 @@ export default function App() {
     scheduleRender();
   };
 
+  const deleteImage = (imageId) => {
+    if (!imagesRef.current.some((image) => image.id === imageId)) return;
+    pushHistory();
+    imagesRef.current = imagesRef.current.filter((image) => image.id !== imageId);
+    imageCacheRef.current.delete(imageId);
+    setSelectedImageId((current) => current === imageId ? null : current);
+    setContextImageId((current) => current === imageId ? null : current);
+    persistDocument();
+    scheduleRender();
+  };
+
   const undo = () => {
     if (!historyRef.current.length) return;
     futureRef.current.push(snapshot());
@@ -167,24 +230,43 @@ export default function App() {
     context.fillRect(0, 0, canvas.width, canvas.height);
     context.setTransform(dpr * view.zoom, 0, 0, dpr * view.zoom, dpr * view.x, dpr * view.y);
 
-    const spacing = view.zoom < 0.55 ? 100 : view.zoom < 0.9 ? 50 : 25;
     const left = -view.x / view.zoom;
     const top = -view.y / view.zoom;
     const right = left + rect.width / view.zoom;
     const bottom = top + rect.height / view.zoom;
-    context.beginPath();
-    context.strokeStyle = "#edf0f5";
-    context.lineWidth = 1 / view.zoom;
+    if (background === "grid") {
+      const spacing = 25;
+      context.beginPath();
+      context.strokeStyle = "#edf0f5";
+      context.lineWidth = 1 / view.zoom;
 
-    for (let x = Math.floor(left / spacing) * spacing; x <= right; x += spacing) {
-      context.moveTo(x, top);
-      context.lineTo(x, bottom);
+      for (let x = Math.floor(left / spacing) * spacing; x <= right; x += spacing) {
+        context.moveTo(x, top);
+        context.lineTo(x, bottom);
+      }
+      for (let y = Math.floor(top / spacing) * spacing; y <= bottom; y += spacing) {
+        context.moveTo(left, y);
+        context.lineTo(right, y);
+      }
+      context.stroke();
+    } else if (background === "ruled") {
+      const spacing = 32;
+      context.beginPath();
+      context.strokeStyle = "#dbe6f2";
+      context.lineWidth = 1 / view.zoom;
+
+      for (let y = Math.floor(top / spacing) * spacing; y <= bottom; y += spacing) {
+        context.moveTo(left, y);
+        context.lineTo(right, y);
+      }
+      context.stroke();
+
+      context.beginPath();
+      context.strokeStyle = "#f3c7c7";
+      context.moveTo(48, top);
+      context.lineTo(48, bottom);
+      context.stroke();
     }
-    for (let y = Math.floor(top / spacing) * spacing; y <= bottom; y += spacing) {
-      context.moveTo(left, y);
-      context.lineTo(right, y);
-    }
-    context.stroke();
 
     for (const image of imagesRef.current) {
       let bitmap = imageCacheRef.current.get(image.id);
@@ -280,6 +362,11 @@ export default function App() {
   }, [selectedImageId]);
 
   useEffect(() => {
+    localStorage.setItem(BACKGROUND_KEY, background);
+    scheduleRender();
+  }, [background]);
+
+  useEffect(() => {
     const onKeyDown = (event) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
         event.preventDefault();
@@ -292,12 +379,7 @@ export default function App() {
       } else if (event.key === "Escape") {
         setTool("pen");
       } else if ((event.key === "Delete" || event.key === "Backspace") && selectedImageId) {
-        pushHistory();
-        imagesRef.current = imagesRef.current.filter((image) => image.id !== selectedImageId);
-        imageCacheRef.current.delete(selectedImageId);
-        setSelectedImageId(null);
-        persistDocument();
-        scheduleRender();
+        deleteImage(selectedImageId);
       }
     };
     const onKeyUp = (event) => {
@@ -344,32 +426,38 @@ export default function App() {
     if (changed) scheduleRender();
   };
 
+  const getImageAt = (point) => [...imagesRef.current].reverse().find((image) =>
+    point.x >= image.x &&
+    point.x <= image.x + image.width &&
+    point.y >= image.y &&
+    point.y <= image.y + image.height
+  );
+
   const handlePointerDown = (event) => {
     event.currentTarget.setPointerCapture(event.pointerId);
     const point = screenToWorld(event.clientX, event.clientY);
+    setContextImageId(null);
+    if (event.button === 2) rightPanMovedRef.current = false;
 
-    if (tool === "select") {
-      const hit = [...imagesRef.current].reverse().find((image) =>
-        point.x >= image.x &&
-        point.x <= image.x + image.width &&
-        point.y >= image.y &&
-        point.y <= image.y + image.height
-      );
-      setSelectedImageId(hit?.id || null);
-      if (hit) {
-        pushHistory();
-        imageDragRef.current = { id: hit.id, pointer: point, x: hit.x, y: hit.y };
-      }
-      return;
-    }
-
-    if (tool === "pan" || event.button === 1) {
+    if (tool === "pan" || event.button === 1 || event.button === 2) {
       panRef.current = {
         pointerX: event.clientX,
         pointerY: event.clientY,
         viewX: viewRef.current.x,
         viewY: viewRef.current.y,
+        button: event.button,
       };
+      setIsPanning(true);
+      return;
+    }
+
+    if (tool === "select") {
+      const hit = getImageAt(point);
+      setSelectedImageId(hit?.id || null);
+      if (hit) {
+        pushHistory();
+        imageDragRef.current = { id: hit.id, pointer: point, x: hit.x, y: hit.y };
+      }
       return;
     }
 
@@ -401,6 +489,15 @@ export default function App() {
     }
 
     if (panRef.current) {
+      if (
+        panRef.current.button === 2 &&
+        Math.hypot(
+          event.clientX - panRef.current.pointerX,
+          event.clientY - panRef.current.pointerY,
+        ) > 4
+      ) {
+        rightPanMovedRef.current = true;
+      }
       viewRef.current.x = panRef.current.viewX + event.clientX - panRef.current.pointerX;
       viewRef.current.y = panRef.current.viewY + event.clientY - panRef.current.pointerY;
       setZoomLabel(Math.round(viewRef.current.zoom * 100));
@@ -429,7 +526,10 @@ export default function App() {
   };
 
   const handlePointerUp = (event) => {
-    if (panRef.current) panRef.current = null;
+    if (panRef.current) {
+      panRef.current = null;
+      setIsPanning(false);
+    }
     if (imageDragRef.current) {
       imageDragRef.current = null;
       persistDocument();
@@ -466,6 +566,18 @@ export default function App() {
     scheduleRender();
   };
 
+  const handleContextMenu = (event) => {
+    event.preventDefault();
+    if (rightPanMovedRef.current) {
+      rightPanMovedRef.current = false;
+      return;
+    }
+
+    const hit = getImageAt(screenToWorld(event.clientX, event.clientY));
+    setContextImageId(hit?.id || null);
+    if (hit) setSelectedImageId(hit.id);
+  };
+
   const clearBoard = () => {
     if (!strokesRef.current.length && !imagesRef.current.length) return;
     pushHistory();
@@ -473,6 +585,7 @@ export default function App() {
     imagesRef.current = [];
     imageCacheRef.current.clear();
     setSelectedImageId(null);
+    setContextImageId(null);
     persistDocument();
     scheduleRender();
   };
@@ -669,6 +782,20 @@ export default function App() {
     event.target.value = "";
   };
 
+  const contextImage = imagesRef.current.find((image) => image.id === contextImageId);
+  const contextImagePosition = contextImage && canvasRef.current
+    ? (() => {
+      const canvasRect = canvasRef.current.getBoundingClientRect();
+      const wrapRect = canvasRef.current.parentElement.getBoundingClientRect();
+      return {
+        left: canvasRect.left - wrapRect.left + viewRef.current.x +
+          (contextImage.x + contextImage.width) * viewRef.current.zoom,
+        top: canvasRect.top - wrapRect.top + viewRef.current.y +
+          contextImage.y * viewRef.current.zoom,
+      };
+    })()
+    : null;
+
   return (
     <main className="app">
       <header className="toolbar">
@@ -676,45 +803,10 @@ export default function App() {
           <span className="brand-mark" />
           <strong>Whiteboard</strong>
         </div>
-
-        <div className="tools">
-          <button className={tool === "pen" ? "tool active" : "tool"} type="button" onClick={() => setTool("pen")} title="Kalem">
-            Kalem
-          </button>
-          <button className={tool === "eraser" ? "tool active" : "tool"} type="button" onClick={() => setTool("eraser")} title="Silgi">
-            Silgi
-          </button>
-          <button className={tool === "pan" ? "tool active" : "tool"} type="button" onClick={() => setTool("pan")} title="Tahta sürükleme">
-            Taşı
-          </button>
-          <button className={tool === "select" ? "tool active" : "tool"} type="button" onClick={() => setTool("select")} title="Görsel seç ve taşı">
-            Seç
-          </button>
-
-          <label className="control" title="Kalem rengi">
-            <span>Renk</span>
-            <input type="color" value={color} onChange={(event) => setColor(event.target.value)} />
-          </label>
-
-          <label className="control width-control" title="Kalem kalınlığı">
-            <span>Kalınlık</span>
-            <input type="range" min="2" max="30" value={width} onChange={(event) => setWidth(Number(event.target.value))} />
-          </label>
-
-          <button className="tool icon-tool" type="button" onClick={undo} title="Geri al (Ctrl+Z)">↶</button>
-          <button className="tool icon-tool" type="button" onClick={redo} title="İleri al (Ctrl+Y)">↷</button>
-          <button className="tool" type="button" onClick={resetView}>100%</button>
-          <button className="tool" type="button" onClick={clearBoard}>Temizle</button>
-          <button className="tool" type="button" onClick={saveDocument}>Kaydet</button>
-          <button className="tool" type="button" onClick={() => fileInputRef.current.click()}>Aç</button>
-          <button className="tool" type="button" onClick={() => imageInputRef.current.click()}>Görsel/PDF</button>
-          <button className="tool primary" type="button" onClick={downloadPng}>PNG</button>
-          <input ref={fileInputRef} type="file" accept=".json,application/json" onChange={openDocument} hidden />
-          <input ref={imageInputRef} type="file" accept="image/*,.pdf,application/pdf" multiple onChange={openImageFiles} hidden />
-        </div>
       </header>
 
       <section className="canvas-wrap">
+
         <canvas
           ref={canvasRef}
           onPointerDown={handlePointerDown}
@@ -722,12 +814,80 @@ export default function App() {
           onPointerUp={handlePointerUp}
           onPointerCancel={handlePointerUp}
           onWheel={handleWheel}
-          onContextMenu={(event) => event.preventDefault()}
+          onContextMenu={handleContextMenu}
           onDragOver={(event) => event.preventDefault()}
           onDrop={handleDrop}
-          className={`canvas-${tool}`}
+          className={`canvas-${tool}${isPanning ? " canvas-panning" : ""}`}
         />
-        <div className="zoom-chip">{zoomLabel}%</div>
+        {contextImage && contextImagePosition && (
+          <button
+            className="image-delete-button"
+            type="button"
+            style={contextImagePosition}
+            onClick={() => deleteImage(contextImage.id)}
+            title="Görseli sil"
+            aria-label="Görseli sil"
+          >
+            ×
+          </button>
+        )}
+        <div className="tool-dock" role="toolbar" aria-label="Whiteboard araçları">
+          <div className="dock-group" role="group" aria-label="Çizim araçları">
+            <DockButton icon="pen" label="Kalem" onClick={() => setTool("pen")} active={tool === "pen"} pressed={tool === "pen"} />
+            <DockButton icon="eraser" label="Silgi" onClick={() => setTool("eraser")} active={tool === "eraser"} pressed={tool === "eraser"} />
+            <DockButton icon="pan" label="Tahtayı taşı (sağ tuşla sürükle)" onClick={() => setTool("pan")} active={tool === "pan"} pressed={tool === "pan"} />
+            <DockButton icon="select" label="Görsel seç ve taşı" onClick={() => setTool("select")} active={tool === "select"} pressed={tool === "select"} />
+          </div>
+          <span className="dock-divider" aria-hidden="true" />
+          <div className="dock-group" role="group" aria-label="Kalem ayarları">
+            <label className="dock-button color-button" title="Kalem rengi">
+              <Icon name="color" style={{ color }} />
+              <input aria-label="Kalem rengi" type="color" value={color} onChange={(event) => setColor(event.target.value)} />
+            </label>
+            <div className="width-anchor">
+              <DockButton
+                icon="width"
+                label={`Kalem kalınlığı: ${width}`}
+                onClick={() => setShowWidthControl((value) => !value)}
+                active={showWidthControl}
+                pressed={showWidthControl}
+              />
+              {showWidthControl && (
+                <div className="width-popover">
+                  <label>
+                    <span>Kalınlık</span>
+                    <output>{width}</output>
+                    <input type="range" min="2" max="30" value={width} onChange={(event) => setWidth(Number(event.target.value))} />
+                  </label>
+                </div>
+              )}
+            </div>
+          </div>
+          <span className="dock-divider" aria-hidden="true" />
+          <div className="dock-group" role="group" aria-label="Geçmiş">
+            <DockButton icon="undo" label="Geri al (Ctrl+Z)" onClick={undo} />
+            <DockButton icon="redo" label="İleri al (Ctrl+Y)" onClick={redo} />
+          </div>
+          <span className="dock-divider" aria-hidden="true" />
+          <div className="dock-group" role="group" aria-label="Tahta işlemleri">
+            <DockButton icon="zoom" label="Yakınlaştırmayı sıfırla" onClick={resetView} />
+            <DockButton icon="clear" label="Tahtayı temizle" onClick={clearBoard} />
+            <DockButton icon="save" label="JSON olarak kaydet" onClick={saveDocument} />
+            <DockButton icon="open" label="Tahta dosyası aç" onClick={() => fileInputRef.current?.click()} />
+            <DockButton icon="image" label="Görsel veya PDF ekle" onClick={() => imageInputRef.current?.click()} />
+            <DockButton icon="download" label="PNG olarak dışa aktar" onClick={downloadPng} />
+          </div>
+          <span className="dock-divider" aria-hidden="true" />
+          <div className="dock-group" role="group" aria-label="Tahta zemini">
+            <DockButton icon="plain" label="Düz beyaz zemin" onClick={() => setBackground("plain")} active={background === "plain"} pressed={background === "plain"} />
+            <DockButton icon="grid" label="Kareli zemin" onClick={() => setBackground("grid")} active={background === "grid"} pressed={background === "grid"} />
+            <DockButton icon="ruled" label="Çizgili zemin" onClick={() => setBackground("ruled")} active={background === "ruled"} pressed={background === "ruled"} />
+          </div>
+          <span className="dock-divider" aria-hidden="true" />
+          <span className="zoom-chip" aria-label={`Yakınlaştırma ${zoomLabel}%`}>{zoomLabel}%</span>
+        </div>
+        <input ref={fileInputRef} type="file" accept=".json,application/json" onChange={openDocument} hidden />
+        <input ref={imageInputRef} type="file" accept="image/*,.pdf,application/pdf" multiple onChange={openImageFiles} hidden />
         {notice && <div className="notice">{notice}</div>}
       </section>
     </main>
